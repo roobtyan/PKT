@@ -1,0 +1,55 @@
+# Sample configuration for training on a synthetic classification dataset
+
+datasets:
+  train:
+    name: random_classification
+    params:
+      num_samples: 1024
+      num_features: 20
+      num_classes: 4
+      seed: 42
+  val:
+    name: random_classification
+    params:
+      num_samples: 256
+      num_features: 20
+      num_classes: 4
+      seed: 1337
+
+dataloaders:
+  train:
+    batch_size: 64
+    shuffle: true
+    num_workers: 0
+  val:
+    batch_size: 128
+    shuffle: false
+
+model:
+  backbone:
+    name: mlp
+    params:
+      input_dim: 20
+      hidden_dims: [128, 64]
+      activation: relu
+  head:
+    name: classification_head
+    params:
+      num_classes: 4
+
+optimizer:
+  name: adam
+  params:
+    lr: 0.001
+
+scheduler:
+  name: step_lr
+  params:
+    step_size: 5
+    gamma: 0.5
+
+trainer:
+  max_epochs: 3
+  device: cpu
+  log_interval: 5
+  output_dir: outputs/demo
