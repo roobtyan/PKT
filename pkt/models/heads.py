@@ -36,12 +36,11 @@ class ClassificationHead(BaseHead):
 
     def forward(self, features: torch.Tensor, target: torch.Tensor | None = None) -> Dict[str, Any]:
         logits = self.fc(features)
-        output: Dict[str, Any] = {"logits": logits}
+        preds = torch.argmax(logits, dim=1)
+        output: Dict[str, Any] = {"logits": logits, "preds": preds}
         if target is not None:
             loss = F.cross_entropy(logits, target, label_smoothing=self.label_smoothing)
             output["loss"] = loss
-            preds = torch.argmax(logits, dim=1)
-            output["preds"] = preds
         return output
 
 

@@ -59,6 +59,10 @@ class TrainerConfig:
     precision: str = "float32"
     output_dir: str = "outputs"
     gradient_accumulation: int = 1
+    save_checkpoints: bool = True
+    checkpoint_interval: int = 1
+    checkpoint_dir: str | None = None
+    resume_from: str | None = None
     additional_args: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -98,6 +102,10 @@ def _trainer_to_dict(cfg: TrainerConfig) -> Dict[str, Any]:
         "precision": cfg.precision,
         "output_dir": cfg.output_dir,
         "gradient_accumulation": cfg.gradient_accumulation,
+        "save_checkpoints": cfg.save_checkpoints,
+        "checkpoint_interval": cfg.checkpoint_interval,
+        "checkpoint_dir": cfg.checkpoint_dir,
+        "resume_from": cfg.resume_from,
         "additional_args": cfg.additional_args,
     }
 
@@ -213,6 +221,15 @@ def _parse_component(section: Any, cls: type[ComponentConfig]) -> ComponentConfi
 def _parse_trainer(section: Any) -> TrainerConfig:
     section = _ensure_mapping(section, "trainer")
     additional_args = dict(section.get("additional_args", {}) or {})
+    checkpoint_interval = int(section.get("checkpoint_interval", 1))
+    if checkpoint_interval <= 0:
+        raise ValueError("Trainer 'checkpoint_interval' must be a positive integer")
+    checkpoint_dir = section.get("checkpoint_dir")
+    if checkpoint_dir is not None:
+        checkpoint_dir = str(checkpoint_dir)
+    resume_from = section.get("resume_from")
+    if resume_from is not None:
+        resume_from = str(resume_from)
     return TrainerConfig(
         max_epochs=int(section.get("max_epochs", 1)),
         device=str(section.get("device", "cpu")),
@@ -220,6 +237,10 @@ def _parse_trainer(section: Any) -> TrainerConfig:
         precision=str(section.get("precision", "float32")),
         output_dir=str(section.get("output_dir", "outputs")),
         gradient_accumulation=int(section.get("gradient_accumulation", 1)),
+        save_checkpoints=bool(section.get("save_checkpoints", True)),
+        checkpoint_interval=checkpoint_interval,
+        checkpoint_dir=checkpoint_dir,
+        resume_from=resume_from,
         additional_args=additional_args,
     )
 
