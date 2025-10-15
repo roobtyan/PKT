@@ -22,3 +22,34 @@
 - `tests/`：基础单元测试，验证配置加载与模型构建流程。
 
 更多设计细节可参考 `docs/config_framework_plan.md`。
+
+## NuScenes 数据加载器
+
+- 新增 `nuscenes_lidar_fusion` 数据集，可从 NuScenes 读取激光雷达 + 多摄像头数据并返回用于融合模型的输入与 3D 标注。
+- 依赖 `nuscenes-devkit` 以及用于加载图片的 `Pillow`，请提前安装：`pip install nuscenes-devkit pillow`。
+- 配置示例（仅示意，请按实际路径调整）：
+
+  ```yaml
+  datasets:
+    train:
+      name: nuscenes_lidar_fusion
+      params:
+        dataroot: /data/nuscenes
+        version: v1.0-mini
+        split: train
+        camera_channels: [CAM_FRONT, CAM_FRONT_RIGHT, CAM_FRONT_LEFT]
+        num_sweeps: 1
+        max_lidar_points: 80000
+        skip_empty: true
+        random_seed: 42
+    val:
+      name: nuscenes_lidar_fusion
+      params:
+        dataroot: /data/nuscenes
+        version: v1.0-mini
+        split: val
+        camera_channels: [CAM_FRONT]
+        load_annotations: false  # 推理或无标注场景时可关闭
+  ```
+
+- 在代码中构建数据集时可以传入 `transform`、`target_transform` 以及自定义的 `lidar_loader`/`image_loader` 回调，以适配具体的融合模型前处理流程。
