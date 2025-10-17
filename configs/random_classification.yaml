@@ -36,7 +36,6 @@ model:
     name: classification_head
     params:
       num_classes: 4
-
 optimizer:
   name: adam
   params:
@@ -53,3 +52,7 @@ trainer:
   device: cpu
   log_interval: 5
   output_dir: outputs/demo
+  losses:
+    - name: cross_entropy
+      params:
+        label_smoothing: 0.05

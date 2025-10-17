@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, Mapping, MutableMapping
+from typing import Any, Dict, Mapping, MutableMapping
 
 import yaml
 
@@ -64,6 +64,7 @@ class TrainerConfig:
     checkpoint_dir: str | None = None
     resume_from: str | None = None
     additional_args: Dict[str, Any] = field(default_factory=dict)
+    losses: list[ComponentConfig] = field(default_factory=list)
 
 
 @dataclass
@@ -107,6 +108,7 @@ def _trainer_to_dict(cfg: TrainerConfig) -> Dict[str, Any]:
         "checkpoint_dir": cfg.checkpoint_dir,
         "resume_from": cfg.resume_from,
         "additional_args": cfg.additional_args,
+        "losses": [vars(loss_cfg) for loss_cfg in cfg.losses],
     }
 
 
@@ -218,6 +220,23 @@ def _parse_component(section: Any, cls: type[ComponentConfig]) -> ComponentConfi
     return cls(name=section["name"], params=dict(params))
 
 
+def _parse_losses(section: Any, location: str) -> list[ComponentConfig]:
+    """Parse a loss configuration or sequence of configurations."""
+
+    if section is None:
+        return []
+    if isinstance(section, Mapping):
+        return [_parse_component(section, ComponentConfig)]
+    if isinstance(section, (list, tuple)):
+        losses: list[ComponentConfig] = []
+        for idx, loss_cfg in enumerate(section):
+            if not isinstance(loss_cfg, Mapping):
+                raise TypeError(f"Loss configuration at {location}[{idx}] must be a mapping")
+            losses.append(_parse_component(loss_cfg, ComponentConfig))
+        return losses
+    raise TypeError(f"Loss configuration at {location} must be a mapping or a sequence of mappings")
+
+
 def _parse_trainer(section: Any) -> TrainerConfig:
     section = _ensure_mapping(section, "trainer")
     additional_args = dict(section.get("additional_args", {}) or {})
@@ -230,6 +249,11 @@ def _parse_trainer(section: Any) -> TrainerConfig:
     resume_from = section.get("resume_from")
     if resume_from is not None:
         resume_from = str(resume_from)
+    losses_section = None
+    if "losses" in section:
+        losses_section = section["losses"]
+    elif "loss" in section:
+        losses_section = section["loss"]
     return TrainerConfig(
         max_epochs=int(section.get("max_epochs", 1)),
         device=str(section.get("device", "cpu")),
@@ -242,6 +266,7 @@ def _parse_trainer(section: Any) -> TrainerConfig:
         checkpoint_dir=checkpoint_dir,
         resume_from=resume_from,
         additional_args=additional_args,
+        losses=_parse_losses(losses_section, "trainer.losses"),
     )
 
 

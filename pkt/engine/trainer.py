@@ -8,8 +8,10 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import torch
+from torch import nn
 from pkt.config import TrainingConfig
 from pkt.data import build_dataloader, build_dataset
+from pkt.losses import LOSS_REGISTRY
 from pkt.models import build_model
 from pkt.optim import OPTIMIZER_REGISTRY, SCHEDULER_REGISTRY
 from pkt.utils.logging import configure_logging
@@ -41,6 +43,13 @@ class Trainer:
 
         self.logger.debug("Building model")
         self.model = build_model(cfg.model).to(self.device)
+
+        self.loss_modules: List[Any] = []
+        for loss_cfg in cfg.trainer.losses:
+            module = LOSS_REGISTRY.build(vars(loss_cfg))
+            if isinstance(module, nn.Module):
+                module = module.to(self.device)
+            self.loss_modules.append(module)
 
         self.logger.debug("Setting up optimizer and scheduler")
         self.optimizer = OPTIMIZER_REGISTRY.build(
@@ -183,7 +192,14 @@ class Trainer:
                 raise ValueError(f"Training requires targets but split '{split}' yielded none.")
             if training:
                 output = self.model(inputs, target)
-                loss = output["loss"]
+                loss = output.get("loss")
+                if loss is None:
+                    loss = self._compute_loss(output, target, split)
+                if loss is None:
+                    raise KeyError(
+                        "No loss available for training step. Ensure the head returns a 'loss' "
+                        "entry or configure trainer.losses."
+                    )
                 (loss / grad_accum).backward()
                 if step % grad_accum == 0 or step == num_batches:
                     optimizer.step()
@@ -192,6 +208,8 @@ class Trainer:
                 with torch.no_grad():
                     output = self.model(inputs, target)
                     loss = output.get("loss")
+                    if loss is None:
+                        loss = self._compute_loss(output, target, split)
                     if loss is None:
                         loss = torch.zeros((), device=device)
             running_loss += float(loss.detach().cpu())
@@ -236,6 +254,7 @@ class Trainer:
             "model": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "scheduler": self.scheduler.state_dict() if self.scheduler is not None else None,
+            "loss_modules": self._loss_module_states(),
             "train_metrics": train_stats,
             "val_metrics": val_stats,
             "cfg": self.cfg.as_dict(),
@@ -261,7 +280,9 @@ class Trainer:
         if not ckpt_path.exists():
             raise FileNotFoundError(f"Checkpoint file not found: {ckpt_path}")
         self.logger.info("Loading checkpoint from %s", ckpt_path)
-        checkpoint = torch.load(ckpt_path, map_location=self.device)
+        # Explicitly disable weights-only loading (PyTorch 2.6+ defaults to True) so that
+        # configuration metadata stored in the checkpoint can be deserialized.
+        checkpoint = torch.load(ckpt_path, map_location=self.device, weights_only=False)
         model_state = checkpoint.get("model")
         if model_state is None:
             raise KeyError("Checkpoint is missing 'model' state_dict")
@@ -273,6 +294,9 @@ class Trainer:
         scheduler_state = checkpoint.get("scheduler")
         if scheduler_state is not None and self.scheduler is not None:
             self.scheduler.load_state_dict(scheduler_state)
+        loss_states = checkpoint.get("loss_modules")
+        if loss_states is not None:
+            self._restore_loss_modules(loss_states)
 
         self._start_epoch = int(checkpoint.get("epoch", 0)) + 1
         self.global_step = int(checkpoint.get("global_step", 0))
@@ -323,6 +347,57 @@ class Trainer:
                 torch.cuda.set_rng_state_all(cuda_state)
             except RuntimeError:
                 self.logger.warning("Failed to restore CUDA RNG state from checkpoint.", exc_info=True)
+
+    def _compute_loss(
+        self,
+        output: Dict[str, Any],
+        target: torch.Tensor | None,
+        split: str,
+    ) -> torch.Tensor | None:
+        if not self.loss_modules:
+            return None
+        if target is None:
+            raise ValueError(f"Loss modules configured but dataset for split '{split}' did not return targets.")
+        logits = output.get("logits")
+        if logits is None:
+            raise KeyError("Model output does not contain 'logits'; cannot compute configured losses.")
+        total_loss = logits.new_zeros(())
+        kwargs = {"logits": logits, "target": target, "output": output, "split": split}
+        for module in self.loss_modules:
+            func = module
+            try:
+                loss_value = func(**kwargs)
+            except TypeError:
+                loss_value = func(logits, target)
+            if not torch.is_tensor(loss_value):
+                raise TypeError(
+                    f"Loss function {func.__class__.__name__} returned {type(loss_value).__name__}, expected torch.Tensor."
+                )
+            total_loss = total_loss + loss_value.to(logits.device)
+        return total_loss
+
+    def _loss_module_states(self) -> List[Any]:
+        states: List[Any] = []
+        for module in self.loss_modules:
+            if isinstance(module, nn.Module):
+                states.append(module.state_dict())
+            else:
+                states.append(None)
+        return states
+
+    def _restore_loss_modules(self, states: Any) -> None:
+        if not isinstance(states, list):
+            self.logger.warning("Loss module state in checkpoint is not a list; skipping restore.")
+            return
+        if len(states) != len(self.loss_modules):
+            self.logger.warning(
+                "Checkpoint loss module count (%d) does not match current configuration (%d).",
+                len(states),
+                len(self.loss_modules),
+            )
+        for module, state in zip(self.loss_modules, states):
+            if isinstance(module, nn.Module) and state is not None:
+                module.load_state_dict(state)
 
 
 def _to_device(batch, device: torch.device):

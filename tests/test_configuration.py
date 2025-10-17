@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 
 import pytest
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 torch = pytest.importorskip("torch")
+import torch.nn.functional as F
 
 from pkt import Trainer, load_yaml_config
 
@@ -13,15 +19,26 @@ def test_load_and_build(tmp_path: Path):
     cfg_path = Path("configs/random_classification.yaml")
     cfg = load_yaml_config(cfg_path)
     assert cfg.datasets["train"].name == "random_classification"
+    assert cfg.trainer.losses and cfg.trainer.losses[0].name == "cross_entropy"
     trainer = Trainer(cfg)
     # ensure forward pass works for one batch
     train_loader = trainer.dataloaders["train"]
     batch = next(iter(train_loader))
     inputs, targets = batch
     outputs = trainer.model(inputs, targets)
-    assert "loss" in outputs
+    assert "loss" not in outputs
     assert outputs["logits"].shape[0] == inputs.shape[0]
-    assert torch.isfinite(outputs["loss"]).all()
+    assert trainer.loss_modules and len(trainer.loss_modules) == len(cfg.trainer.losses)
+    computed_loss = trainer._compute_loss(outputs, targets, split="train")
+    assert computed_loss is not None
+    assert torch.isfinite(computed_loss).all()
+    loss_cfg = cfg.trainer.losses[0]
+    manual_loss = F.cross_entropy(
+        outputs["logits"],
+        targets,
+        label_smoothing=float(loss_cfg.params.get("label_smoothing", 0.0)),
+    )
+    assert torch.allclose(computed_loss, manual_loss)
 
 
 def test_checkpoint_save_and_resume(tmp_path: Path):
