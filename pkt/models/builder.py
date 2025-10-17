@@ -5,7 +5,7 @@ from torch import nn
 
 from pkt.config import ModelConfig
 from pkt.models.backbones import BACKBONE_REGISTRY
-from pkt.models.heads import HEAD_REGISTRY, BaseHead
+from pkt.heads import HEAD_REGISTRY, BaseHead
 
 
 class ConfigurableModel(nn.Module):
