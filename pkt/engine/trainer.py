@@ -400,24 +400,34 @@ class Trainer:
                 module.load_state_dict(state)
 
 
+def _move_to_device(value, device: torch.device):
+    if torch.is_tensor(value):
+        return value.to(device)
+    if isinstance(value, dict):
+        return {k: _move_to_device(v, device) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(_move_to_device(v, device) for v in value)
+    return value
+
+
 def _to_device(batch, device: torch.device):
     if isinstance(batch, (list, tuple)):
         if len(batch) == 2:
-            inputs = batch[0].to(device)
+            inputs = _move_to_device(batch[0], device)
             target_tensor = batch[1]
             if target_tensor is not None:
-                target_tensor = target_tensor.to(device)
+                target_tensor = _move_to_device(target_tensor, device)
             return inputs, target_tensor
         if len(batch) == 1:
-            inputs = batch[0].to(device)
+            inputs = _move_to_device(batch[0], device)
             return inputs, None
     elif isinstance(batch, dict):
         if "inputs" not in batch:
             raise KeyError("Dictionary batch must contain an 'inputs' key")
-        inputs = batch["inputs"].to(device)
+        inputs = _move_to_device(batch["inputs"], device)
         target_tensor = batch.get("targets") or batch.get("target")
         if target_tensor is not None:
-            target_tensor = target_tensor.to(device)
+            target_tensor = _move_to_device(target_tensor, device)
         return inputs, target_tensor
     elif torch.is_tensor(batch):
         return batch.to(device), None

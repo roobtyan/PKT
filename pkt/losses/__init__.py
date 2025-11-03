@@ -4,13 +4,21 @@ from __future__ import annotations
 from typing import Sequence
 
 import torch
-from torch import nn
 import torch.nn.functional as F
+from torch import nn
 
 from pkt.registry import Registry
-
+from pkt.losses.routing import (
+    RoutingTrajectoryObjective,
+    STLonObjective,
+    TrajectoryClassificationObjective,
+)
 
 LOSS_REGISTRY = Registry("loss")
+
+LOSS_REGISTRY.register("routing_trajectory")(RoutingTrajectoryObjective)
+LOSS_REGISTRY.register("trajectory_classification")(TrajectoryClassificationObjective)
+LOSS_REGISTRY.register("st_lon")(STLonObjective)
 
 
 @LOSS_REGISTRY.register("cross_entropy")
@@ -18,12 +26,12 @@ class CrossEntropyLoss(nn.Module):
     """Cross-entropy loss with optional label smoothing and class weights."""
 
     def __init__(
-        self,
-        weight: float = 1.0,
-        label_smoothing: float = 0.0,
-        reduction: str = "mean",
-        ignore_index: int = -100,
-        class_weights: Sequence[float] | torch.Tensor | None = None,
+            self,
+            weight: float = 1.0,
+            label_smoothing: float = 0.0,
+            reduction: str = "mean",
+            ignore_index: int = -100,
+            class_weights: Sequence[float] | torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         if reduction not in {"mean", "sum", "none"}:
@@ -45,10 +53,10 @@ class CrossEntropyLoss(nn.Module):
         self.register_buffer("_class_weights", weight_tensor, persistent=True)
 
     def forward(
-        self,
-        logits: torch.Tensor,
-        target: torch.Tensor,
-        **_: object,
+            self,
+            logits: torch.Tensor,
+            target: torch.Tensor,
+            **_: object,
     ) -> torch.Tensor:  # type: ignore[override]
         weight = self._class_weights if self._class_weights.numel() > 0 else None
         loss = F.cross_entropy(
@@ -64,4 +72,10 @@ class CrossEntropyLoss(nn.Module):
         return loss
 
 
-__all__ = ["LOSS_REGISTRY", "CrossEntropyLoss"]
+__all__ = [
+    "LOSS_REGISTRY",
+    "CrossEntropyLoss",
+    "RoutingTrajectoryObjective",
+    "TrajectoryClassificationObjective",
+    "STLonObjective",
+]

@@ -6,11 +6,13 @@ from pkt.data.nuscenes import (
     DEFAULT_CLASS_NAMES,
     NuScenesLidarFusionDataset,
 )
+from pkt.data.routing import RandomRoutingDataset
 
 __all__ = [
     "DATASET_REGISTRY",
     "BaseDataset",
     "RandomClassificationDataset",
+    "RandomRoutingDataset",
     "NuScenesLidarFusionDataset",
     "DEFAULT_CLASS_NAMES",
     "DEFAULT_CAMERA_CHANNELS",

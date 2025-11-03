@@ -1,0 +1,60 @@
+dataloaders:
+  train:
+    batch_size: 8
+    shuffle: true
+    num_workers: 0
+  val:
+    batch_size: 8
+    shuffle: false
+
+datasets:
+  train:
+    name: random_routing
+    params:
+      num_samples: 64
+      seed: 42
+  val:
+    name: random_routing
+    params:
+      num_samples: 32
+      seed: 1337
+
+model:
+  backbone:
+    name: routing_perception
+    params:
+      raster_channels: 28
+      sd_channels: 2
+      raster_size: [64, 64]
+      num_points: 100
+      routing_modalities: 5
+      motion_modalities: 3
+      lon_modalities: 5
+      lon_steps: 50
+      agent_feature_dim: 76
+      num_agents: 8
+  head:
+    name: routing_head
+    params: {}
+
+optimizer:
+  name: adam
+  params:
+    lr: 0.0005
+
+trainer:
+  max_epochs: 2
+  device: cpu
+  log_interval: 5
+  output_dir: outputs/routing
+  losses:
+    - name: routing_trajectory
+      params:
+        weight: 1.0
+    - name: trajectory_classification
+      params:
+        weight: 1.0
+        lcc_weight: 0.5
+    - name: st_lon
+      params:
+        weight: 0.1
