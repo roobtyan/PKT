@@ -1,0 +1,62 @@
+# 配置：使用 Transformer 编码器骨干在随机分类数据上快速测试
+
+datasets:
+  train:
+    name: random_classification
+    params:
+      num_samples: 1024
+      num_features: 64  # = seq_len (8) * token_dim (8)
+      num_classes: 4
+      seed: 2024
+  val:
+    name: random_classification
+    params:
+      num_samples: 256
+      num_features: 64
+      num_classes: 4
+      seed: 7
+
+dataloaders:
+  train:
+    batch_size: 64
+    shuffle: true
+    num_workers: 0
+  val:
+    batch_size: 128
+    shuffle: false
+
+model:
+  backbone:
+    name: transformer_encoder
+    params:
+      input_dim: 64
+      seq_len: 8
+      d_model: 8
+      heads_num: 2
+      layers_num: 2
+      dropout: 0.1
+      layer_types: ["self", "self"]
+      pooling: mean
+  head:
+    name: classification_head
+    params:
+      num_classes: 4
+
+optimizer:
+  name: adam
+  params:
+    lr: 0.001
+
+scheduler:
+  name: step_lr
+  params:
+    step_size: 5
+    gamma: 0.5
+
+trainer:
+  max_epochs: 2
+  device: cpu
+  log_interval: 5
+  output_dir: outputs/transformer_demo
+  losses:
+    - name: cross_entropy
