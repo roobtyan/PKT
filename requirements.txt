@@ -4,3 +4,4 @@ numpy
 nuscenes-devkit
 pillow
 pytest
+matplotlib

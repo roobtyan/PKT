@@ -53,3 +53,15 @@
   ```
 
 - 在代码中构建数据集时可以传入 `transform`、`target_transform` 以及自定义的 `lidar_loader`/`image_loader` 回调，以适配具体的融合模型前处理流程。
+- 数据准备：将官方的 `v1.0-trainval_meta.tgz` 解压到 `dataroot`，再按顺序解压 `v1.0-trainval0X_blobs.tgz`（本仓库提供 `scripts/visualize_nuscenes.py` 可辅助完成解压和可视化）。例如：
+  ```bash
+  # 解压单个分卷并生成一张样例可视化图（包含 LiDAR BEV + 某个摄像头视角）
+  python scripts/visualize_nuscenes.py \
+    --dataroot /data/nuscenes \
+    --version v1.0-trainval \
+    --split train \
+    --blob /path/to/v1.0-trainval03_blobs.tgz \
+    --index 0 \
+    --output outputs/nuscenes_sample.png
+  ```
+  如果数据已经解压，可去掉 `--blob` 直接运行。
