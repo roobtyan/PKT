@@ -11,6 +11,7 @@ from pkt.config import (
     load_yaml_config,
 )
 from pkt.engine.trainer import Trainer
+from pkt.data.nuscenes import DEFAULT_CAMERA_CHANNELS, NuScenesLidarFusionDataset
 
 __all__ = [
     "ComponentConfig",
@@ -23,4 +24,6 @@ __all__ = [
     "TrainingConfig",
     "load_yaml_config",
     "Trainer",
+    "DEFAULT_CAMERA_CHANNELS",
+    "NuScenesLidarFusionDataset"
 ]

@@ -1,11 +1,10 @@
 from collections.abc import Sequence as SequenceCollection
-from typing import Union, Sequence, Tuple
+from typing import Union, Sequence
 
 import torch
 import torch.nn as nn
 
-from conv import DepthwiseBlock
-from pkt.models.conv import ConvBnAct
+from pkt.models.conv import ConvBnAct, DepthwiseBlock
 
 
 class LightBackbone(nn.Module):
@@ -13,7 +12,7 @@ class LightBackbone(nn.Module):
             self,
             in_channels,
             stem_channels,
-                stage_channels: Sequence[int] = (64, 96, 128, 256),
+            stage_channels: Sequence[int] = (64, 96, 128, 256),
             num_blocks: Sequence[int] = (1, 2, 3, 2),
             stage_strides: Sequence[int] = (2, 2, 2, 2),
             expansion: float = 2.0,
