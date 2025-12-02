@@ -5,9 +5,8 @@ from __future__ import annotations
 
 import argparse
 import math
-import sys
 from pathlib import Path
-from typing import Iterable, Sequence, Tuple
+from typing import Sequence, Tuple
 
 import matplotlib
 
@@ -16,6 +15,7 @@ import matplotlib.pyplot as plt
 import torch
 from pkt.data.nuscenes import NuScenesLidarFusionDataset
 from pkt.models.light_backbone import LightBackbone
+from pkt.models.fpn import FPN
 
 
 def parse_args() -> argparse.Namespace:
@@ -168,6 +168,12 @@ def plot_features(
 
 
 def main() -> None:
+    base_out_stride = [8, 16, 32]
+    backbone_out_channels = [96, 128, 256]
+    embed_dims = 48
+    stride_out = 8
+    stride_out_channel = backbone_out_channels[base_out_stride.index(stride_out)]
+
     args = parse_args()
     dataroot = Path(args.dataroot).expanduser().resolve()
     output_path = Path(args.output).expanduser()
@@ -200,7 +206,9 @@ def main() -> None:
     else:
         # 只有 cat_dim=1 (channel concat) 时才需要累加通道
         in_ch = reference_image.shape[0] if len(image_list) == 1 else sum(img.shape[0] for img in image_list)
-    backbone = LightBackbone(in_channels=in_ch, stem_channels=32, cat_dim=args.cat_dim)
+    backbone = LightBackbone(in_channels=in_ch, stem_channels=32, cat_dim=args.cat_dim, out_strides=base_out_stride,
+                             stride_out=stride_out)
+    fpn_backbone = FPN(in_channels=backbone_out_channels, out_channels=embed_dims, num_outs=4, sep_conv=False)
     backbone.to(device).eval()
 
     with torch.no_grad():
@@ -209,6 +217,7 @@ def main() -> None:
         else:
             model_input = [img.unsqueeze(0).to(device) for img in image_list]  # sequence input
         feats = backbone(model_input)
+        feats = fpn_backbone(feats)
 
     feature_maps = list(zip(backbone.out_strides, feats))
     plot_features(

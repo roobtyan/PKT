@@ -109,3 +109,55 @@ class DepthwiseBlock(nn.Module):
         if self.shortcut is not None:
             out = out + self.shortcut(x)
         return out
+
+
+class DepthwiseSeparableConv(nn.Module):
+    def __init__(
+            self,
+            in_channels: int,
+            out_channels: int,
+            kernel_size: int = 3,
+            stride: int = 1,
+            padding: int = 1,
+            bias: bool = False,
+            use_bn: bool = True,
+            act_layer: nn.Module = nn.ReLU(inplace=True),
+    ):
+        super().__init__()
+
+        self.depthwise = nn.Conv2d(
+            in_channels,
+            in_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            groups=in_channels,
+            bias=bias,
+        )
+
+        self.pointwise = nn.Conv2d(
+            in_channels,
+            out_channels,
+            kernel_size=1,
+            bias=bias,
+            stride=1,
+            padding=0,
+        )
+
+        self.use_bn = use_bn
+        if use_bn:
+            self.bn = nn.BatchNorm2d(out_channels)
+        else:
+            self.bn = None
+        self.act_layer = _build_activation(act_layer, inplace=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.depthwise(x)
+        x = self.pointwise(x)
+
+        if self.bn is not None:
+            x = self.bn(x)
+
+        if self.act_layer is not None:
+            x = self.act_layer(x)
+        return x
