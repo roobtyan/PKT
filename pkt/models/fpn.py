@@ -1,5 +1,6 @@
 from typing import List, Union
 
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -121,3 +122,38 @@ class FPN(nn.Module):
             return tuple(outs[i] for i in self.out_index)
         else:
             return outs[self.out_index]
+
+
+class ViewSelector(nn.Module):
+    def __init__(self, index=[0], total_views=6):
+        super(ViewSelector, self).__init__()
+        self.index = index
+        self.total_views = total_views
+
+    def forward(self, inputs, *args):
+        outputs = []
+
+        for feat in inputs:
+            bv, c, h, w = feat.shape
+            b = bv // self.total_views
+            # reshape
+            feat = feat.reshape(b, self.total_views, c, h, w)
+            # slice
+            feat = feat[:, self.index]
+            # reshape bv
+            feat = feat.reshape(-1, c, h, w)
+            outputs.append(feat)
+
+        ext = []
+        for arg in args:
+            if isinstance(arg, torch.Tensor):
+                bv, *rest = arg.shape
+                b = bv // self.total_views
+                arg = arg.reshape(b, self.total_views, *rest)
+                arg = arg[:, self.index]
+                ext.append(arg.reshape(-1, *rest))
+            else:
+                raise TypeError
+        if len(ext) > 0:
+            return outputs, *ext
+        return outputs
