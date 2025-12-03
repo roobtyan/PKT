@@ -82,6 +82,8 @@ class BEVVisualizationModel(nn.Module):
             "bev_feats": bev_feats,
             "images": [(name, img) for name, img in zip(selected, processed_images)],
             "selected_cams": selected,
+            "world_points": world_pts,
+            "camera_points": cam_pts,
         }
         # Inline visualizers (optional)
         for visualizer in self.visualizers:

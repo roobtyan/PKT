@@ -1,6 +1,7 @@
 """Point sampling utilities for projecting multi-view features onto a BEV grid."""
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import List, Sequence
 
 import torch
@@ -9,6 +10,7 @@ import torch.nn.functional as F
 
 from pkt.data.nuscenes import ProjectionBatch, ProjectionSample
 from pkt.engine.registries import MODULES
+from pkt.models.anchors import Anchor3DRangeGenerator, AlignedAnchor3DRangeGenerator
 
 
 def _list_int_size(shape: Sequence[int]) -> List[int]:
@@ -26,6 +28,9 @@ class PointSample(nn.Module):
         embed_dims: int,
         order: str = "NCDHW",
         is_trace: bool = False,
+        anchor_generator: Anchor3DRangeGenerator | Mapping | None = None,
+        n_voxels: Sequence[int] | None = None,
+        div: int = 1,
     ) -> None:
         super().__init__()
         if len(point_cloud_range) != 6:
@@ -39,20 +44,53 @@ class PointSample(nn.Module):
         if torch.any(span <= 0):
             raise ValueError("point_cloud_range must have max > min on all axes")
 
-        n_x = max(int(torch.round(span[0] / vs[0]).item()), 1)
-        n_y = max(int(torch.round(span[1] / vs[1]).item()), 1)
-        n_z = max(int(torch.round(span[2] / vs[2]).item()), 1)
+        div = max(1, int(div))
+        if n_voxels is not None:
+            if len(n_voxels) != 3:
+                raise ValueError("n_voxels must have 3 values [nx, ny, nz]")
+            nx, ny, nz = [max(1, int(v)) for v in n_voxels]
+        else:
+            nx = max(int(torch.round(span[0] / vs[0]).item()), 1)
+            ny = max(int(torch.round(span[1] / vs[1]).item()), 1)
+            nz = max(int(torch.round(span[2] / vs[2]).item()), 1)
 
+        nx = max(1, nx // div)
+        ny = max(1, ny // div)
+
+        self.anchor_generator = self._init_anchor_generator(anchor_generator)
         self.point_cloud_range = pc
         self.voxel_size = vs
-        self.n_voxels = [n_x, n_y, n_z]
-        self.voxel_shape = (n_z, n_y, n_x)
+        self.n_voxels = [nx, ny, nz]
+        self.voxel_shape = (self.n_voxels[2], self.n_voxels[1], self.n_voxels[0])  # (D, H, W)
         self.embed_dims = int(embed_dims)
         self.num_cams = int(num_cams)
         self.order = order
         self.is_trace = is_trace
 
-        self.register_buffer("world_grid", self._create_world_grid(), persistent=False)
+        world_grid = self._create_anchor_world_grid() if self.anchor_generator else self._create_world_grid()
+        self.register_buffer("world_grid", world_grid, persistent=False)
+
+    @staticmethod
+    def _init_anchor_generator(
+        cfg: Anchor3DRangeGenerator | Mapping | None,
+    ) -> Anchor3DRangeGenerator | None:
+        if cfg is None:
+            return None
+        if isinstance(cfg, Anchor3DRangeGenerator):
+            return cfg
+        if isinstance(cfg, Mapping):
+            cfg_dict = dict(cfg)
+            obj_type = cfg_dict.pop("type", cfg_dict.pop("name", None))
+            if obj_type is None:
+                raise KeyError("anchor_generator config must include 'type'")
+            if obj_type == "AlignedAnchor3DRangeGenerator":
+                cls = AlignedAnchor3DRangeGenerator
+            elif obj_type == "Anchor3DRangeGenerator":
+                cls = Anchor3DRangeGenerator
+            else:
+                raise KeyError(f"Unsupported anchor generator type '{obj_type}'")
+            return cls(**cfg_dict)
+        raise TypeError("anchor_generator must be None, a Mapping, or an Anchor3DRangeGenerator instance")
 
     def _create_world_grid(self) -> torch.Tensor:
         pc = self.point_cloud_range
@@ -64,6 +102,21 @@ class PointSample(nn.Module):
         coords = torch.stack([xx, yy, zz], dim=-1)
         ones = torch.ones_like(xx)[..., None]
         return torch.cat([coords, ones], dim=-1)  # (D, H, W, 4)
+
+    def _create_anchor_world_grid(self) -> torch.Tensor:
+        if self.anchor_generator is None:
+            raise RuntimeError("anchor generator not initialized")
+        feature_size = self.voxel_shape
+        anchor_range = self.point_cloud_range.tolist()
+        device = self.point_cloud_range.device
+        anchors = self.anchor_generator.anchors_single_range(
+            feature_size=feature_size,
+            anchor_range=anchor_range,
+            device=device,
+        )
+        centers = anchors[..., 0, 0, :3]
+        ones = torch.ones_like(centers[..., :1])
+        return torch.cat([centers, ones], dim=-1)
 
     def _prepare_projection(
         self,
@@ -180,6 +233,9 @@ class DeformablePointSample(PointSample):
         skip_connection: bool = True,
         is_trace: bool = False,
         num_levels: int = 4,
+        anchor_generator: Anchor3DRangeGenerator | Mapping | None = None,
+        n_voxels: Sequence[int] | None = None,
+        div: int = 1,
         **kwargs,
     ) -> None:
         super().__init__(
@@ -189,6 +245,9 @@ class DeformablePointSample(PointSample):
             embed_dims=embed_dims,
             order=order,
             is_trace=is_trace,
+            anchor_generator=anchor_generator,
+            n_voxels=n_voxels,
+            div=div,
         )
         self.transformer = transformer
         self.order2 = order

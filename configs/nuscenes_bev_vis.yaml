@@ -46,8 +46,11 @@ model:
     total_views: 6
   sampler:
     type: DeformablePointSample
-    point_cloud_range: [-40.0, -40.0, -4.0, 150.0, 40.0, 2.0]
+    point_cloud_range: [-60.0, -60.0, -4.0, 140.0, 60.0, 4.0]
     voxel_size: [1.0, 1.0, 2.0]
+    n_voxels: [75, 60, 6]
+    anchor_generator:
+      type: AlignedAnchor3DRangeGenerator
     embed_dims: 48
     num_levels: 3
     num_cams: 3
@@ -65,3 +68,8 @@ hooks:
         reduction: mean
         channel: 0
         colormap: magma
+      - type: VoxelGridVisualizer
+        output: outputs/voxel_grid.png
+        max_points: 20000
+        elev: 25
+        azim: -45
