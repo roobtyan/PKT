@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -466,4 +466,200 @@ class NuScenesLidarFusionDataset(BaseDataset):
         return target
 
 
-__all__ = ["NuScenesLidarFusionDataset", "DEFAULT_CLASS_NAMES", "DEFAULT_CAMERA_CHANNELS"]
+def _quaternion_to_matrix(quat: torch.Tensor) -> torch.Tensor:
+    if quat.numel() != 4:
+        raise ValueError(f"Quaternion must have 4 values; got shape {tuple(quat.shape)}")
+    w, x, y, z = quat.tolist()
+    ww = w * w
+    xx = x * x
+    yy = y * y
+    zz = z * z
+    wx = w * x
+    wy = w * y
+    wz = w * z
+    xy = x * y
+    xz = x * z
+    yz = y * z
+    return torch.tensor(
+        [
+            [ww + xx - yy - zz, 2 * (xy - wz), 2 * (xz + wy)],
+            [2 * (xy + wz), ww - xx + yy - zz, 2 * (yz - wx)],
+            [2 * (xz - wy), 2 * (yz + wx), ww - xx - yy + zz],
+        ],
+        dtype=torch.float32,
+    )
+
+
+def _build_transform(rotation: torch.Tensor, translation: torch.Tensor) -> torch.Tensor:
+    mat = torch.eye(4, dtype=torch.float32)
+    mat[:3, :3] = _quaternion_to_matrix(rotation)
+    mat[:3, 3] = translation
+    return mat
+
+
+def _invert_transform(mat: torch.Tensor) -> torch.Tensor:
+    rot = mat[:3, :3]
+    trans = mat[:3, 3]
+    inv = torch.eye(4, dtype=torch.float32)
+    inv[:3, :3] = rot.t()
+    inv[:3, 3] = -rot.t() @ trans
+    return inv
+
+
+@dataclass
+class ProjectionSample:
+    cameras: List[str]
+    proj_mats: torch.Tensor  # (num_cams, 4, 4)
+    extrinsics: torch.Tensor  # (num_cams, 4, 4)
+    intrinsics: torch.Tensor  # (num_cams, 3, 3)
+    image_sizes: torch.Tensor  # (num_cams, 2) -> (H, W)
+
+    def to(self, device: torch.device | str) -> "ProjectionSample":
+        return ProjectionSample(
+            cameras=list(self.cameras),
+            proj_mats=self.proj_mats.to(device),
+            extrinsics=self.extrinsics.to(device),
+            intrinsics=self.intrinsics.to(device),
+            image_sizes=self.image_sizes.to(device),
+        )
+
+
+@dataclass
+class ProjectionBatch:
+    cameras: List[str]
+    proj_mats: torch.Tensor  # (B, num_cams, 4, 4)
+    extrinsics: torch.Tensor  # (B, num_cams, 4, 4)
+    intrinsics: torch.Tensor  # (B, num_cams, 3, 3)
+    image_sizes: torch.Tensor  # (B, num_cams, 2)
+
+    def to(self, device: torch.device | str) -> "ProjectionBatch":
+        return ProjectionBatch(
+            cameras=list(self.cameras),
+            proj_mats=self.proj_mats.to(device),
+            extrinsics=self.extrinsics.to(device),
+            intrinsics=self.intrinsics.to(device),
+            image_sizes=self.image_sizes.to(device),
+        )
+
+    @classmethod
+    def from_samples(cls, samples: Sequence[ProjectionSample]) -> "ProjectionBatch":
+        if not samples:
+            raise ValueError("ProjectionBatch.from_samples requires at least one sample")
+        cameras = samples[0].cameras
+        for sample in samples:
+            if sample.cameras != cameras:
+                raise ValueError("All samples must share the same camera ordering for batching")
+        proj = torch.stack([sample.proj_mats for sample in samples], dim=0)
+        extr = torch.stack([sample.extrinsics for sample in samples], dim=0)
+        intr = torch.stack([sample.intrinsics for sample in samples], dim=0)
+        sizes = torch.stack([sample.image_sizes for sample in samples], dim=0)
+        return cls(cameras=list(cameras), proj_mats=proj, extrinsics=extr, intrinsics=intr, image_sizes=sizes)
+
+
+def _lidar_to_image_matrix(
+    lidar_global: torch.Tensor,
+    cam_pose: torch.Tensor,
+    cam_calib: torch.Tensor,
+    intrinsics: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    global_to_cam_ego = _invert_transform(cam_pose)
+    ego_to_cam = _invert_transform(cam_calib)
+    lidar_to_cam = ego_to_cam @ global_to_cam_ego @ lidar_global
+
+    proj = torch.zeros((4, 4), dtype=torch.float32)
+    proj[:3, :4] = intrinsics @ lidar_to_cam[:3, :4]
+    proj[3, 3] = 1.0
+    return lidar_to_cam, proj
+
+
+def fuse_projection(
+    inputs: Mapping[str, Any],
+    cameras: Optional[Sequence[str]] = None,
+) -> ProjectionSample:
+    if "metadata" not in inputs or "images" not in inputs:
+        raise KeyError("Inputs must contain 'metadata' and 'images' to build projections")
+
+    metadata: Mapping[str, Any] = inputs["metadata"]
+    images: Mapping[str, torch.Tensor] = inputs["images"]
+
+    lidar_meta = metadata["lidar"]  # type: ignore[index]
+    lidar_calibration: SensorCalibration = lidar_meta["calibration"]  # type: ignore[assignment]
+    lidar_pose: EgoPose = lidar_meta["ego_pose"]  # type: ignore[assignment]
+
+    lidar_to_ego = _build_transform(_to_tensor(lidar_calibration.rotation), _to_tensor(lidar_calibration.translation))
+    ego_to_global = _build_transform(_to_tensor(lidar_pose.rotation), _to_tensor(lidar_pose.translation))
+    lidar_to_global = ego_to_global @ lidar_to_ego
+
+    camera_meta: Mapping[str, Mapping[str, Any]] = metadata["cameras"]  # type: ignore[index]
+    if cameras is None:
+        camera_list = sorted(camera_meta.keys())
+    else:
+        camera_list = list(cameras)
+    if not camera_list:
+        raise ValueError("No cameras provided for projection fusion")
+
+    proj_mats: List[torch.Tensor] = []
+    extrinsics: List[torch.Tensor] = []
+    intrinsics: List[torch.Tensor] = []
+    image_sizes: List[torch.Tensor] = []
+
+    for cam_name in camera_list:
+        if cam_name not in camera_meta:
+            raise KeyError(f"Camera '{cam_name}' not found in metadata")
+        cam_info = camera_meta[cam_name]
+        cam_pose: EgoPose = cam_info["ego_pose"]  # type: ignore[assignment]
+        cam_calib: SensorCalibration = cam_info["calibration"]  # type: ignore[assignment]
+        cam_pose_mat = _build_transform(_to_tensor(cam_pose.rotation), _to_tensor(cam_pose.translation))
+        cam_calib_mat = _build_transform(_to_tensor(cam_calib.rotation), _to_tensor(cam_calib.translation))
+        intrinsic = _to_tensor(cam_calib.camera_intrinsic, dtype=torch.float32)  # type: ignore[arg-type]
+        if intrinsic.shape != (3, 3):
+            raise ValueError(f"Invalid intrinsic matrix for '{cam_name}': shape {tuple(intrinsic.shape)}")
+
+        lidar_to_cam, proj = _lidar_to_image_matrix(lidar_to_global, cam_pose_mat, cam_calib_mat, intrinsic)
+        proj_mats.append(proj)
+        extrinsics.append(lidar_to_cam)
+        intrinsics.append(intrinsic)
+
+        img_tensor = images[cam_name]
+        image_sizes.append(torch.tensor(img_tensor.shape[-2:], dtype=torch.float32))
+
+    return ProjectionSample(
+        cameras=camera_list,
+        proj_mats=torch.stack(proj_mats, dim=0),
+        extrinsics=torch.stack(extrinsics, dim=0),
+        intrinsics=torch.stack(intrinsics, dim=0),
+        image_sizes=torch.stack(image_sizes, dim=0),
+    )
+
+
+def collate_and_fuse_projection(
+    batch: Sequence[Mapping[str, Any]],
+    cameras: Optional[Sequence[str]] = None,
+) -> ProjectionBatch:
+    samples = [fuse_projection(sample, cameras=cameras) for sample in batch]
+    return ProjectionBatch.from_samples(samples)
+
+
+class FuseProjection:
+    """Dataset transform that appends fused projection matrices to inputs."""
+
+    def __init__(self, cameras: Optional[Sequence[str]] = None) -> None:
+        self.cameras = list(cameras) if cameras is not None else None
+
+    def __call__(self, inputs: MutableMapping[str, Any], target: Any = None):
+        projection = fuse_projection(inputs, cameras=self.cameras)
+        new_inputs = dict(inputs)
+        new_inputs["projection"] = projection
+        return new_inputs, target
+
+
+__all__ = [
+    "NuScenesLidarFusionDataset",
+    "DEFAULT_CLASS_NAMES",
+    "DEFAULT_CAMERA_CHANNELS",
+    "ProjectionSample",
+    "ProjectionBatch",
+    "FuseProjection",
+    "collate_and_fuse_projection",
+    "fuse_projection",
+]

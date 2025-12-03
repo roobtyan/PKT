@@ -1,5 +1,12 @@
 #!/usr/bin/env python
-"""Visualize LightBackbone feature maps on a NuScenes sample."""
+"""
+Visualize LightBackbone feature maps on a NuScenes sample.
+Usage：
+python pkt/visualize/visualize_light_backbone.py --dataroot data/v1.0-mini \
+    --version v1.0-mini --split mini_train --sample-index 0 --cat-dim 0 \
+    --channels 8 --cols 4 --output outputs/light_backbone_features.png  \
+    --bev-output outputs/sample_bev.png  --point-cloud-range -40 -40 -4 140 40 2
+"""
 
 from __future__ import annotations
 
@@ -13,9 +20,11 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import torch
-from pkt.data.nuscenes import NuScenesLidarFusionDataset
+from pkt.data.nuscenes import NuScenesLidarFusionDataset, ProjectionBatch, fuse_projection
 from pkt.models.light_backbone import LightBackbone
-from pkt.models.fpn import FPN
+from pkt.models.point_sample import DeformablePointSample
+from pkt.models.fpn import FPN, ViewSelector
+from pkt.models.anchors import AlignedAnchor3DRangeGenerator
 
 
 def parse_args() -> argparse.Namespace:
@@ -50,6 +59,46 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="outputs/light_backbone_features.png",
         help="Path to save the rendered figure.",
+    )
+    parser.add_argument(
+        "--bev-output",
+        type=str,
+        default=None,
+        help="Optional path to save a BEV heatmap rendered from fused features.",
+    )
+    parser.add_argument(
+        "--bev-channel",
+        type=int,
+        default=0,
+        help="Channel index (after depth reduction) to visualize in the BEV heatmap.",
+    )
+    parser.add_argument(
+        "--bev-reduction",
+        choices=["mean", "max"],
+        default="mean",
+        help="How to collapse the depth dimension before projecting onto BEV.",
+    )
+    parser.add_argument(
+        "--bev-colormap",
+        type=str,
+        default="magma",
+        help="Matplotlib colormap used for the BEV heatmap.",
+    )
+    parser.add_argument(
+        "--point-cloud-range",
+        type=float,
+        nargs=6,
+        default=(-30.0, -30.0, -4.0, 30.0, 30.0, 2.0),
+        metavar=("x_min", "y_min", "z_min", "x_max", "y_max", "z_max"),
+        help="Spatial bounds of the BEV grid (meters).",
+    )
+    parser.add_argument(
+        "--voxel-size",
+        type=float,
+        nargs=3,
+        default=(1.0, 1.0, 2.0),
+        metavar=("vx", "vy", "vz"),
+        help="Voxel size (meters) along x/y/z for the BEV sampler.",
     )
     return parser.parse_args()
 
@@ -206,9 +255,12 @@ def main() -> None:
     else:
         # 只有 cat_dim=1 (channel concat) 时才需要累加通道
         in_ch = reference_image.shape[0] if len(image_list) == 1 else sum(img.shape[0] for img in image_list)
+
     backbone = LightBackbone(in_channels=in_ch, stem_channels=32, cat_dim=args.cat_dim, out_strides=base_out_stride,
                              stride_out=stride_out)
     fpn_backbone = FPN(in_channels=backbone_out_channels, out_channels=embed_dims, num_outs=4, sep_conv=False)
+    view_selector = ViewSelector(list(range(len(selected_cams))), len(selected_cams))
+
     backbone.to(device).eval()
 
     with torch.no_grad():
@@ -216,8 +268,10 @@ def main() -> None:
             model_input = reference_image.unsqueeze(0).to(device)  # (B, C, H, W)
         else:
             model_input = [img.unsqueeze(0).to(device) for img in image_list]  # sequence input
+        # 视觉分支
         feats = backbone(model_input)
         feats = fpn_backbone(feats)
+        feats = view_selector(feats)
 
     feature_maps = list(zip(backbone.out_strides, feats))
     plot_features(
@@ -227,6 +281,62 @@ def main() -> None:
         cols=args.cols,
         output=output_path,
     )
+
+    projection = fuse_projection(inputs, cameras=selected_cams)
+    projection_batch = ProjectionBatch.from_samples([projection]).to(device)
+
+    # 只有在按 batch 维度拼接视角时 (cat_dim=0) 才能进行 BEV 融合
+    if len(selected_cams) > 1 and args.cat_dim != 0:
+        print("[warn] 多视角 BEV 融合需要 --cat-dim 0，已跳过 DeformablePointSample")
+        return
+
+    sampler = DeformablePointSample(
+        point_cloud_range=args.point_cloud_range,
+        voxel_size=args.voxel_size,
+        num_cams=len(selected_cams),
+        embed_dims=embed_dims,
+        num_levels=len(feats),
+    ).to(device)
+    sampler.eval()
+
+    imgs_tensor = torch.stack([images[name] for name in selected_cams], dim=0).to(device)
+    mlvl_feats = [feat for feat in feats]
+    bev_feats, world_pts, cam_pts = sampler(
+        mlvl_feats,
+        projection_batch,
+        intrinsics=projection_batch.intrinsics,
+        imgs=imgs_tensor,
+    )
+    print(f"[info] BEV feature volume shape: {tuple(bev_feats.shape)}")
+
+    anchor_generator = AlignedAnchor3DRangeGenerator()
+    anchors = anchor_generator.anchors_single_range(
+        sampler.voxel_shape,
+        args.point_cloud_range,
+        device=device,
+    )
+    print(f"[info] Generated anchors shape: {tuple(anchors.shape)}")
+
+    if args.bev_output:
+        if bev_feats.dim() != 5:
+            raise ValueError("BEV visualization expects features with shape (N, C, D, H, W)")
+        if args.bev_reduction == "mean":
+            bev_map = bev_feats.mean(dim=2)
+        else:
+            bev_map = bev_feats.max(dim=2).values
+        channel = max(0, min(args.bev_channel, bev_map.shape[1] - 1))
+        bev_slice = bev_map[0, channel].detach().cpu()
+        bev_norm = normalize_feature(bev_slice)
+        bev_img = bev_norm.numpy()
+        bev_output = Path(args.bev_output).expanduser()
+        bev_output.parent.mkdir(parents=True, exist_ok=True)
+        plt.figure(figsize=(6, 5))
+        plt.imshow(bev_img, cmap=args.bev_colormap)
+        plt.axis("off")
+        plt.tight_layout()
+        plt.savefig(bev_output, dpi=200, bbox_inches="tight")
+        plt.close()
+        print(f"[info] Saved BEV heatmap to {bev_output}")
 
 
 if __name__ == "__main__":
