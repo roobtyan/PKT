@@ -5,8 +5,10 @@ import torch
 import torch.nn as nn
 
 from pkt.models.conv import ConvBnAct, DepthwiseBlock
+from pkt.engine.registries import MODULES
 
 
+@MODULES.register("LightBackbone")
 class LightBackbone(nn.Module):
     def __init__(
             self,

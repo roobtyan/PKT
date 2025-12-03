@@ -7,8 +7,11 @@ from typing import Any, Callable, Dict, List, Mapping, MutableMapping, Optional,
 
 import numpy as np
 import torch
+from torch.utils.data._utils.collate import default_collate
 
 from pkt.data.datasets import BaseDataset, DATASET_REGISTRY
+from pkt.engine.registries import PIPELINES, COLLATE_FUNCTIONS
+from pkt.utils.build import build_from_cfg
 
 
 DEFAULT_CAMERA_CHANNELS: Tuple[str, ...] = (
@@ -168,6 +171,7 @@ class NuScenesLidarFusionDataset(BaseDataset):
         random_seed: int | None = None,
         lidar_loader: Callable[[Mapping[str, Any], Mapping[str, Any], Any], torch.Tensor] | None = None,
         image_loader: Callable[[Mapping[str, Any], Mapping[str, Any], Any], torch.Tensor] | None = None,
+        pipeline: Optional[Sequence[Mapping[str, Any]]] = None,
     ) -> None:
         super().__init__()
         self.dataroot = Path(dataroot)
@@ -194,6 +198,7 @@ class NuScenesLidarFusionDataset(BaseDataset):
         self.generator = torch.Generator()
         if random_seed is not None:
             self.generator.manual_seed(random_seed)
+        self.pipeline = [build_from_cfg(step, PIPELINES) for step in (pipeline or [])]
 
         self.nusc = nusc if nusc is not None else _load_nuscenes(version=version, dataroot=self.dataroot)
 
@@ -244,6 +249,9 @@ class NuScenesLidarFusionDataset(BaseDataset):
 
         if self.transform is not None:
             inputs, target = self.transform(inputs, target)
+
+        for transform in self.pipeline:
+            inputs, target = transform(inputs, target)
 
         return inputs, target
 
@@ -631,7 +639,7 @@ def fuse_projection(
         image_sizes=torch.stack(image_sizes, dim=0),
     )
 
-
+@COLLATE_FUNCTIONS.register("collate_and_fuse_projection")
 def collate_and_fuse_projection(
     batch: Sequence[Mapping[str, Any]],
     cameras: Optional[Sequence[str]] = None,
@@ -639,18 +647,52 @@ def collate_and_fuse_projection(
     samples = [fuse_projection(sample, cameras=cameras) for sample in batch]
     return ProjectionBatch.from_samples(samples)
 
+@COLLATE_FUNCTIONS.register("projection_collate")
+def collate_projection_batch(
+    batch: Sequence[Tuple[MutableMapping[str, Any], Any]],
+) -> Tuple[Mapping[str, Any], Any]:
+    if not batch:
+        raise ValueError("collate_projection_batch requires at least one sample")
+    inputs_list: List[MutableMapping[str, Any]] = []
+    targets_list: List[Any] = []
+    projections: List[ProjectionSample] = []
+    for inputs, target in batch:
+        sample = dict(inputs)
+        projection = sample.pop("projection", None)
+        if not isinstance(projection, ProjectionSample):
+            raise TypeError("Expected each sample to contain a ProjectionSample under 'projection'")
+        inputs_list.append(sample)
+        targets_list.append(target)
+        projections.append(projection)
 
+    collated_inputs = default_collate(inputs_list)
+    collated_inputs["projection"] = ProjectionBatch.from_samples(projections)
+
+    if all(t is None for t in targets_list):
+        collated_target = None
+    else:
+        collated_target = default_collate(targets_list)
+    return collated_inputs, collated_target
+
+@PIPELINES.register("FuseProjection")
 class FuseProjection:
     """Dataset transform that appends fused projection matrices to inputs."""
 
-    def __init__(self, cameras: Optional[Sequence[str]] = None) -> None:
+    def __init__(self, cameras: Optional[Sequence[str]] = None, keep_metadata: bool = True) -> None:
         self.cameras = list(cameras) if cameras is not None else None
+        self.keep_metadata = bool(keep_metadata)
 
     def __call__(self, inputs: MutableMapping[str, Any], target: Any = None):
         projection = fuse_projection(inputs, cameras=self.cameras)
         new_inputs = dict(inputs)
         new_inputs["projection"] = projection
+        if not self.keep_metadata:
+            new_inputs.pop("metadata", None)
         return new_inputs, target
+
+
+# Register class name alias for config-driven usage.
+DATASET_REGISTRY.register("NuScenesLidarFusionDataset")(NuScenesLidarFusionDataset)
 
 
 __all__ = [
@@ -661,5 +703,6 @@ __all__ = [
     "ProjectionBatch",
     "FuseProjection",
     "collate_and_fuse_projection",
+    "collate_projection_batch",
     "fuse_projection",
 ]

@@ -3,7 +3,10 @@ from pkt.models.anchors import AlignedAnchor3DRangeGenerator, Anchor3DRangeGener
 from pkt.models.backbones import BACKBONE_REGISTRY, MLPBackbone
 from pkt.models.builder import ConfigurableModel, build_model
 from pkt.models.point_sample import DeformablePointSample, PointSample
+from pkt.models.pipelines import BEVVisualizationModel
 from pkt.models.transformer import Transformer, TransformerBackbone, TransformerLayer
+from pkt.models.light_backbone import LightBackbone
+from pkt.models.fpn import FPN, ViewSelector
 
 __all__ = [
     "BACKBONE_REGISTRY",
@@ -17,4 +20,8 @@ __all__ = [
     "DeformablePointSample",
     "Anchor3DRangeGenerator",
     "AlignedAnchor3DRangeGenerator",
+    "BEVVisualizationModel",
+    "LightBackbone",
+    "FPN",
+    "ViewSelector",
 ]

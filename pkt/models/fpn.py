@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from pkt.models.conv import ConvBnAct, DepthwiseSeparableConv
+from pkt.engine.registries import MODULES
 
 
 class FPN(nn.Module):
@@ -157,3 +158,7 @@ class ViewSelector(nn.Module):
         if len(ext) > 0:
             return outputs, *ext
         return outputs
+
+
+MODULES.register("FPN")(FPN)
+MODULES.register("ViewSelector")(ViewSelector)

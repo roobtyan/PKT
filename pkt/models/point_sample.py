@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from pkt.data.nuscenes import ProjectionBatch, ProjectionSample
+from pkt.engine.registries import MODULES
 
 
 def _list_int_size(shape: Sequence[int]) -> List[int]:
@@ -244,6 +245,10 @@ class DeformablePointSample(PointSample):
             bev_feats = bev_feats.contiguous().view(shape[0], -1, shape[-2], shape[-1])
 
         return bev_feats.contiguous(), world_points, camera_points
+
+
+MODULES.register("PointSample")(PointSample)
+MODULES.register("DeformablePointSample")(DeformablePointSample)
 
 
 __all__ = ["PointSample", "DeformablePointSample"]
