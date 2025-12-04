@@ -1,7 +1,12 @@
 runner:
   type: PipelineRunner
-  device: cpu
+  device: mps
   max_iters: 1
+  distributed:
+    enabled: false  # set true when launching with torchrun
+    backend: nccl
+    init_method: env://
+    find_unused_parameters: false
 
 datasets:
   train:

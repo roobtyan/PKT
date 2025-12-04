@@ -35,8 +35,9 @@ def build_dataset_from_cfg(cfg: Mapping[str, Any]):
     return builder(**cfg)
 
 
-def build_dataloader_from_cfg(dataset: Dataset, cfg: Mapping[str, Any]) -> DataLoader:
+def build_dataloader_from_cfg(dataset: Dataset, cfg: Mapping[str, Any], sampler=None) -> DataLoader:
     cfg = dict(cfg)
+    sampler = sampler or cfg.pop("sampler", None)
     collate_cfg = cfg.pop("collate_fn", None)
     collate_fn = None
     if collate_cfg is not None:
@@ -51,11 +52,12 @@ def build_dataloader_from_cfg(dataset: Dataset, cfg: Mapping[str, Any]) -> DataL
     return DataLoader(
         dataset,
         batch_size=int(cfg.get("batch_size", 1)),
-        shuffle=bool(cfg.get("shuffle", False)),
+        shuffle=False if sampler is not None else bool(cfg.get("shuffle", False)),
         num_workers=int(cfg.get("num_workers", 0)),
         drop_last=bool(cfg.get("drop_last", False)),
         pin_memory=bool(cfg.get("pin_memory", False)),
         collate_fn=collate_fn,
+        sampler=sampler,
     )
 
 

@@ -1,9 +1,13 @@
 """Lightweight runner implementations for configuration-driven workflows."""
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, List, Mapping
 
 import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 
 from pkt.data.builders import build_dataset_from_cfg, build_dataloader_from_cfg
 from pkt.engine.hooks import Hook
@@ -40,12 +44,15 @@ class BaseRunner:
         self.device = torch.device(runner_device)
         self.max_iters = int(runner_iters)
         self.hooks: List[Hook] = []
+        self.is_main_process = True
 
     def register_hook(self, hook: Hook) -> None:
         self.hooks.append(hook)
         self.hooks.sort(key=lambda h: getattr(h, "priority", 50))
 
     def call_hook(self, method: str, *args, **kwargs) -> None:
+        if not self.is_main_process:
+            return
         for hook in self.hooks:
             fn = getattr(hook, method, None)
             if callable(fn):
@@ -59,19 +66,46 @@ class BaseRunner:
 class PipelineRunner(BaseRunner):
     def __init__(self, cfg: Dict[str, Any], **kwargs: Any) -> None:
         super().__init__(cfg, **kwargs)
+        runner_cfg = cfg.get("runner", {})
+        dist_cfg = runner_cfg.get("distributed", {})
+        self.is_distributed = False
+        self.rank = 0
+        self.world_size = 1
+        self._setup_distributed(dist_cfg)
+
         datasets_cfg = cfg.get("datasets", {})
         if "train" not in datasets_cfg:
             raise KeyError("PipelineRunner requires a 'train' dataset configuration")
         self.dataset = build_dataset_from_cfg(datasets_cfg["train"])
 
         dataloader_cfg = cfg.get("dataloaders", {}).get("train", {})
-        self.dataloader = build_dataloader_from_cfg(self.dataset, dataloader_cfg)
+        sampler = None
+        if self.is_distributed:
+            sampler = DistributedSampler(
+                self.dataset,
+                num_replicas=self.world_size,
+                rank=self.rank,
+                shuffle=bool(dataloader_cfg.get("shuffle", False)),
+                drop_last=bool(dataloader_cfg.get("drop_last", False)),
+            )
+        self.dataloader = build_dataloader_from_cfg(self.dataset, dataloader_cfg, sampler=sampler)
+        self.sampler = sampler
 
         model_cfg = cfg.get("model")
         if model_cfg is None:
             raise KeyError("PipelineRunner requires a 'model' configuration")
         self.model = build_from_cfg(model_cfg, MODULES)
         self.model.to(self.device)
+        if self.is_distributed:
+            device_ids = None
+            if self.device.type == "cuda":
+                device_ids = [self.device.index]
+            self.model = DDP(
+                self.model,
+                device_ids=device_ids,
+                output_device=self.device if device_ids else None,
+                find_unused_parameters=bool(dist_cfg.get("find_unused_parameters", False)),
+            )
         self.model.eval()
 
         hook_cfgs = cfg.get("hooks", [])
@@ -82,6 +116,8 @@ class PipelineRunner(BaseRunner):
     def run(self) -> None:
         self.call_hook("before_run")
         iteration = 0
+        if self.is_distributed and isinstance(self.sampler, DistributedSampler):
+            self.sampler.set_epoch(0)
         with torch.no_grad():
             for batch in self.dataloader:
                 if isinstance(batch, (list, tuple)) and len(batch) == 2:
@@ -97,6 +133,34 @@ class PipelineRunner(BaseRunner):
                 if iteration >= self.max_iters:
                     break
         self.call_hook("after_run")
+        if self.is_distributed:
+            dist.barrier()
+            dist.destroy_process_group()
+
+    def _setup_distributed(self, dist_cfg: Mapping[str, Any]) -> None:
+        if not dist_cfg or not dist_cfg.get("enabled", False):
+            return
+        if self.device.type == "mps":
+            raise ValueError("Distributed training is not supported on MPS devices.")
+        if not dist.is_available():
+            raise RuntimeError("torch.distributed is not available but distributed was requested.")
+        backend = dist_cfg.get("backend") or ("nccl" if torch.cuda.is_available() else "gloo")
+        init_method = dist_cfg.get("init_method", "env://")
+        init_kwargs = {"backend": backend, "init_method": init_method}
+        if "world_size" in dist_cfg:
+            init_kwargs["world_size"] = int(dist_cfg["world_size"])
+        if "rank" in dist_cfg:
+            init_kwargs["rank"] = int(dist_cfg["rank"])
+        dist.init_process_group(**init_kwargs)
+
+        self.rank = dist.get_rank()
+        self.world_size = dist.get_world_size()
+        if self.device.type == "cuda":
+            local_rank = int(os.environ.get("LOCAL_RANK", self.rank))
+            torch.cuda.set_device(local_rank)
+            self.device = torch.device("cuda", local_rank)
+        self.is_main_process = self.rank == 0
+        self.is_distributed = True
 
 
 def build_runner(cfg: Dict[str, Any]) -> BaseRunner:

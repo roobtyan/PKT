@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from pkt.engine.registries import MODULES
 from pkt.models.backbones import BACKBONE_REGISTRY
 
 
@@ -121,6 +122,7 @@ class TransformerLayer(nn.Module):
         return x
 
 
+@MODULES.register("Transformer")
 class Transformer(nn.Module):
     def __init__(self, d_model=128, heads_num=12, layers_num=2, layer_names=None, dropout=0.1):
         super(Transformer, self).__init__()
